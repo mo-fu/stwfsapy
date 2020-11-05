@@ -17,14 +17,15 @@ from typing import FrozenSet, List, Iterable, Container, Tuple, TypeVar, Union
 from rdflib.term import URIRef
 from rdflib import Graph
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import Pipeline, FeatureUnion
 from sklearn.compose import ColumnTransformer
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import AdaBoostClassifier
 from scipy.sparse import csr_matrix
 from stwfsapy import thesaurus as t
 from stwfsapy.automata import nfa, construction, conversion, dfa
 from stwfsapy.thesaurus_features import ThesaurusFeatureTransformation
 from stwfsapy.text_features import mk_text_features
+from stwfsapy.frequency_features import FrequencyTransformer
 from stwfsapy import case_handlers
 from stwfsapy import expansion
 import pickle as pkl
@@ -194,12 +195,13 @@ class StwfsapyPredictor(BaseEstimator, ClassifierMixin):
         converter = conversion.NfaToDfaConverter(nfautomat)
         self.dfa_ = converter.start_conversion()
         self.pipeline_ = Pipeline([
-            ("Combined Features", ColumnTransformer([
-                ("Thesaurus Features", thesaurus_features, 0),
-                ("Text Features", mk_text_features(), 1)])),
-            ("Classifier", DecisionTreeClassifier(
-                min_samples_leaf=25,
-                max_leaf_nodes=100))
+            ("Combined Features", FeatureUnion([
+                ("Concept Features", ColumnTransformer([
+                    ("Thesaurus Features", thesaurus_features, 0),
+                    ("Text Features", mk_text_features(), 1)])),
+                ("Document Features", FrequencyTransformer())
+            ])),
+            ("Classifier", AdaBoostClassifier())
         ])
 
     def fit(self, X, y=None, **kwargs):
@@ -264,7 +266,7 @@ class StwfsapyPredictor(BaseEstimator, ClassifierMixin):
     def _create_sparse_matrix(
             self,
             values: Nl,
-            tuples: List[Tuple[T, str]],
+            tuples: List[Tuple[T, str, int]],
             doc_counts: List[int]
             ) -> csr_matrix:
         return csr_matrix(
@@ -290,7 +292,7 @@ class StwfsapyPredictor(BaseEstimator, ClassifierMixin):
     @staticmethod
     def _collect_prediction_results(
             values: Nl,
-            tuples: List[Tuple[T, str]],
+            tuples: List[Tuple[T, str, int]],
             doc_counts: List[int]
             ) -> List[Tuple[List[T], Nl]]:
         ret = []
@@ -305,7 +307,7 @@ class StwfsapyPredictor(BaseEstimator, ClassifierMixin):
             self,
             texts: Iterable[str],
             truth_refss: Iterable[Container] = None
-            ) -> Tuple[List[Tuple[str, str]], List[int]]:
+            ) -> Tuple[List[Tuple[str, str, int]], List[int]]:
         """Retrieves concepts by their labels from text.
         If ground truth values are present,
         it will also return a list of labels for scoring matches.
@@ -318,8 +320,14 @@ class StwfsapyPredictor(BaseEstimator, ClassifierMixin):
                 for match in self.dfa_.search(text):
                     concept = match[0]
                     text = match[1]
-                    concepts.append((concept, text))
+                    concepts.append((concept, text, 0))
                     ret_y.append(int(concept in truth_refs))
+            last_concept = concepts.pop()
+            concepts.append((
+                last_concept[0],
+                last_concept[1],
+                1
+            ))
             return concepts, ret_y
         else:
             doc_counts: List[int] = []
@@ -329,7 +337,7 @@ class StwfsapyPredictor(BaseEstimator, ClassifierMixin):
                     count += 1
                     concept = match[0]
                     text = match[1]
-                    concepts.append((concept, text))
+                    concepts.append((concept, text, 0))
                 doc_counts.append(count)
             return concepts, doc_counts
 
